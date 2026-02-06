@@ -177,12 +177,12 @@ def cmd_status(raw_json=False):
         print(f"  {'Extra usage':20s} ${used:.2f} / ${limit:.2f}")
 
 
-def cmd_daemon():
-    """Run in foreground, refresh every DAEMON_INTERVAL seconds."""
+def cmd_daemon(interval: int = DAEMON_INTERVAL):
+    """Run in foreground, refresh every `interval` seconds."""
     signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 
-    print(f"ccusage daemon started (refreshing every {DAEMON_INTERVAL}s)")
+    print(f"ccusage daemon started (refreshing every {interval}s)")
     print(f"Writing to {USAGE_FILE}")
 
     while True:
@@ -200,7 +200,7 @@ def cmd_daemon():
         except Exception as e:
             print(f"[{datetime.now().strftime('%H:%M:%S')}] Error: {e}", file=sys.stderr)
 
-        time.sleep(DAEMON_INTERVAL)
+        time.sleep(interval)
 
 
 def cmd_install():
@@ -230,7 +230,9 @@ def main():
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("status", help="Show current usage (default)")
     sub.add_parser("json", help="Print raw JSON")
-    sub.add_parser("daemon", help="Run refresh daemon")
+    daemon_parser = sub.add_parser("daemon", help="Run refresh daemon")
+    daemon_parser.add_argument("-i", "--interval", type=int, default=DAEMON_INTERVAL,
+                               help=f"Refresh interval in seconds (default: {DAEMON_INTERVAL})")
     sub.add_parser("install", help="Print setup instructions")
     args = parser.parse_args()
 
@@ -240,7 +242,7 @@ def main():
     elif cmd == "json":
         cmd_status(raw_json=True)
     elif cmd == "daemon":
-        cmd_daemon()
+        cmd_daemon(interval=args.interval)
     elif cmd == "install":
         cmd_install()
 

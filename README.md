@@ -14,7 +14,7 @@ Plan: max_5x
   Extra usage          $0.00 / $1000.00
 ```
 
-Claude Code statusline (updated every 5 min by the daemon):
+Claude Code statusline (updated by the daemon at a customizable interval):
 
 ```
 ~/projects/myapp [Opus 4.6] 5h:39% 7d:15% son:39% | $1.37 | max_5x | reset:1h26m
@@ -47,7 +47,7 @@ Configure the statusline in `~/.claude/settings.json`:
 |---------|-------------|
 | `ccusage` | Show current usage (colored terminal output) |
 | `ccusage json` | Print raw JSON |
-| `ccusage daemon` | Run in foreground, refresh every 5 min |
+| `ccusage daemon [-i SECS]` | Run in foreground, refresh every 5 min (customizable) |
 | `ccusage install` | Print setup instructions |
 
 ## How Claude Code rate limiting works

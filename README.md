@@ -1,6 +1,24 @@
 # ccusage
 
-Claude Code usage monitor. Fetches your real rate limit data from Anthropic's API and writes it to `~/.claude/usage-limits.json` for use in a Claude Code statusline.
+Claude Code usage monitor. Fetches your real rate limit data from Anthropic's API and displays it in the Claude Code statusline.
+
+## Example output
+
+`ccusage` command:
+
+```
+Plan: max_5x
+  Session (5h)         39%  resets 1h26m
+  Week (all)           15%  resets 143h26m
+  Week (Sonnet)        39%  resets 65h26m
+  Extra usage          $0.00 / $1000.00
+```
+
+Claude Code statusline (updated every 5 min by the daemon):
+
+```
+~/projects/myapp [Opus 4.6] 5h:39% 7d:15% son:39% | $1.37 | max_5x | reset:1h26m
+```
 
 ## Setup
 

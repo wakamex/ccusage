@@ -204,6 +204,30 @@ def cmd_daemon(interval: int = DAEMON_INTERVAL):
         time.sleep(interval)
 
 
+def _get_cached_usage(max_age: int = DAEMON_INTERVAL) -> dict:
+    """Read cached usage, refreshing from API if stale or missing."""
+    try:
+        usage = json.loads(USAGE_FILE.read_text())
+        updated = datetime.fromisoformat(usage["updated_at"])
+        age = (datetime.now(timezone.utc) - updated).total_seconds()
+        if age < max_age:
+            return usage
+    except Exception:
+        pass
+    # Cache is stale or missing — try to refresh
+    try:
+        api_data = fetch_usage()
+        usage = build_usage_json(api_data, get_plan())
+        write_usage_file(usage)
+        return usage
+    except Exception:
+        # Return whatever we had, even if stale
+        try:
+            return json.loads(USAGE_FILE.read_text())
+        except Exception:
+            return {}
+
+
 def cmd_statusline():
     """Claude Code statusline command. Reads Claude's JSON from stdin + cached usage."""
     R = "\033[0;31m"
@@ -247,11 +271,8 @@ def cmd_statusline():
 
     cost_fmt = f"${cost:.2f}" if cost > 0 else "$0"
 
-    # Read cached usage
-    try:
-        usage = json.loads(USAGE_FILE.read_text())
-    except Exception:
-        usage = {}
+    # Read cached usage, refresh if stale or missing
+    usage = _get_cached_usage()
 
     plan = usage.get("plan", "?")
     five_h = usage.get("5h", {})

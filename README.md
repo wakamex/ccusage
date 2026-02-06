@@ -20,14 +20,20 @@ Claude Code statusline (updated by the daemon at a customizable interval):
 ~/projects/myapp [Opus 4.6] 5h:39% 7d:15% son:39% | $1.37 | max_5x | reset:1h26m
 ```
 
-## Setup
+## Install
 
 ```bash
-# Run the daemon (keeps usage-limits.json updated every 5 minutes)
-uv run ccusage daemon
+uv tool install git+https://github.com/wakamex/ccusage
+```
 
-# Or just check usage once
-uv run ccusage
+Then run:
+
+```bash
+# Check usage once
+ccusage
+
+# Run the daemon (keeps usage-limits.json updated)
+ccusage daemon
 ```
 
 Configure the statusline in `~/.claude/settings.json`:

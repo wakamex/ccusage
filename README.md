@@ -23,7 +23,7 @@ Claude Code statusline (self-caching — refreshes from API when stale, no daemo
 ## Install
 
 ```bash
-uv tool install git+https://github.com/wakamex/ccusage
+uv tool install ccusage
 ```
 
 Then run:

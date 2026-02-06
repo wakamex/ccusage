@@ -42,7 +42,7 @@ Configure the statusline in `~/.claude/settings.json`:
 {
   "statusLine": {
     "type": "command",
-    "command": "python3 /code/ccusage/statusline.py"
+    "command": "ccusage statusline"
   }
 }
 ```
@@ -54,6 +54,7 @@ Configure the statusline in `~/.claude/settings.json`:
 | `ccusage` | Show current usage (colored terminal output) |
 | `ccusage json` | Print raw JSON |
 | `ccusage daemon [-i SECS]` | Run in foreground, refresh every 5 min (customizable) |
+| `ccusage statusline` | Claude Code statusline command (reads stdin + cache) |
 | `ccusage install` | Print setup instructions |
 
 ## How Claude Code rate limiting works

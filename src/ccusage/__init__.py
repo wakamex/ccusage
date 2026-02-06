@@ -9,6 +9,7 @@ Usage:
     ccusage status       Same as above
     ccusage json         Print raw JSON
     ccusage daemon       Run in foreground, refresh every 5 min, write to ~/.claude/usage-limits.json
+    ccusage statusline   Claude Code statusline command (reads stdin + cache)
     ccusage install      Print setup instructions
 """
 
@@ -203,22 +204,93 @@ def cmd_daemon(interval: int = DAEMON_INTERVAL):
         time.sleep(interval)
 
 
+def cmd_statusline():
+    """Claude Code statusline command. Reads Claude's JSON from stdin + cached usage."""
+    R = "\033[0;31m"
+    Y = "\033[0;33m"
+    G = "\033[0;32m"
+    C = "\033[0;36m"
+    D = "\033[0;90m"
+    RST = "\033[0m"
+
+    def color_pct(pct: int) -> str:
+        c = R if pct >= 70 else Y if pct >= 50 else G
+        return f"{c}{pct}%{RST}"
+
+    def fmt_reset(iso: str | None) -> str:
+        if not iso:
+            return ""
+        try:
+            reset = datetime.fromisoformat(iso)
+            secs = int((reset - datetime.now(timezone.utc)).total_seconds())
+            if secs <= 0:
+                return ""
+            m = secs // 60
+            if m >= 60:
+                return f"{m // 60}h{m % 60}m"
+            return f"{m}m"
+        except Exception:
+            return ""
+
+    # Read Claude Code's JSON from stdin
+    try:
+        cc = json.loads(sys.stdin.read())
+    except Exception:
+        cc = {}
+
+    model = cc.get("model", {}).get("display_name", "?")
+    cost = cc.get("cost", {}).get("total_cost_usd", 0)
+    pwd = cc.get("workspace", {}).get("current_dir", "?")
+    home = str(Path.home())
+    if pwd.startswith(home):
+        pwd = "~" + pwd[len(home):]
+
+    cost_fmt = f"${cost:.2f}" if cost > 0 else "$0"
+
+    # Read cached usage
+    try:
+        usage = json.loads(USAGE_FILE.read_text())
+    except Exception:
+        usage = {}
+
+    plan = usage.get("plan", "?")
+    five_h = usage.get("5h", {})
+    seven_d = usage.get("7d", {})
+    sonnet = usage.get("7d_sonnet", {})
+
+    parts = [f"{D}{pwd}{RST}", f"[{C}{model}{RST}]"]
+
+    if five_h:
+        parts.append(f"5h:{color_pct(int(five_h.get('pct', 0)))}")
+    if seven_d:
+        parts.append(f"7d:{color_pct(int(seven_d.get('pct', 0)))}")
+    if sonnet:
+        parts.append(f"son:{color_pct(int(sonnet.get('pct', 0)))}")
+
+    parts.append(f"| {cost_fmt} | {D}{plan}{RST}")
+
+    reset = fmt_reset(five_h.get("resets_at"))
+    if reset:
+        parts.append(f"| {D}reset:{reset}{RST}")
+
+    print(" ".join(parts))
+
+
 def cmd_install():
     """Print setup instructions."""
-    script_path = Path(__file__).resolve().parent.parent.parent / "statusline.py"
-    print(f"""ccusage setup
+    print("""ccusage setup
 =============
 
 1. Run the daemon (in a terminal, tmux, or systemd):
-   python3 {Path(__file__).resolve()} daemon
+   ccusage daemon
 
 2. Configure Claude Code statusline in ~/.claude/settings.json:
-   {{
-     "statusLine": {{
+   {
+     "statusLine": {
        "type": "command",
-       "command": "{script_path}"
-     }}
-   }}
+       "command": "ccusage statusline"
+     }
+   }
 
 3. The statusline reads ~/.claude/usage-limits.json (written by the daemon)
    and shows: 5h session, 7d all-models, 7d Sonnet-specific limits.
@@ -233,6 +305,7 @@ def main():
     daemon_parser = sub.add_parser("daemon", help="Run refresh daemon")
     daemon_parser.add_argument("-i", "--interval", type=int, default=DAEMON_INTERVAL,
                                help=f"Refresh interval in seconds (default: {DAEMON_INTERVAL})")
+    sub.add_parser("statusline", help="Claude Code statusline (reads stdin + cache)")
     sub.add_parser("install", help="Print setup instructions")
     args = parser.parse_args()
 
@@ -243,6 +316,8 @@ def main():
         cmd_status(raw_json=True)
     elif cmd == "daemon":
         cmd_daemon(interval=args.interval)
+    elif cmd == "statusline":
+        cmd_statusline()
     elif cmd == "install":
         cmd_install()
 

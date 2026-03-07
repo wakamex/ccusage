@@ -81,7 +81,7 @@ def fetch_usage() -> dict:
         headers={
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
-            "User-Agent": "ccusage/1.0",
+            "User-Agent": "claude-code/2.1.71",
             "anthropic-beta": "oauth-2025-04-20",
         },
     )
@@ -186,22 +186,30 @@ def cmd_daemon(interval: int = DAEMON_INTERVAL):
     print(f"ccusage daemon started (refreshing every {interval}s)")
     print(f"Writing to {USAGE_FILE}")
 
+    backoff = 0
     while True:
         try:
             api_data = fetch_usage()
             plan = get_plan()
             data = build_usage_json(api_data, plan)
             write_usage_file(data)
+            backoff = 0
             pcts = []
             for key in ("5h", "7d", "7d_sonnet"):
                 b = data.get(key)
                 if b:
                     pcts.append(f"{key}:{int(b['pct'])}%")
             print(f"[{datetime.now().strftime('%H:%M:%S')}] {' '.join(pcts)}")
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                backoff = min((backoff or interval) * 2, 3600)
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] 429 — backing off {backoff}s", file=sys.stderr)
+            else:
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] Error: {e}", file=sys.stderr)
         except Exception as e:
             print(f"[{datetime.now().strftime('%H:%M:%S')}] Error: {e}", file=sys.stderr)
 
-        time.sleep(interval)
+        time.sleep(backoff or interval)
 
 
 def _get_cached_usage(max_age: int = DAEMON_INTERVAL) -> dict:

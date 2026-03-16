@@ -22,6 +22,8 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+_TTY = sys.stdout.isatty()
+
 CLAUDE_DIR = Path.home() / ".claude"
 CREDENTIALS_FILE = CLAUDE_DIR / ".credentials.json"
 USAGE_FILE = CLAUDE_DIR / "usage-limits.json"
@@ -131,11 +133,11 @@ def cmd_status(raw_json=False):
         print(json.dumps(data, indent=2))
         return
 
-    R = "\033[0;31m"
-    Y = "\033[0;33m"
-    G = "\033[0;32m"
-    D = "\033[0;90m"
-    RST = "\033[0m"
+    R = "\033[0;31m" if _TTY else ""
+    Y = "\033[0;33m" if _TTY else ""
+    G = "\033[0;32m" if _TTY else ""
+    D = "\033[0;90m" if _TTY else ""
+    RST = "\033[0m" if _TTY else ""
 
     def color_pct(pct):
         p = int(pct)
@@ -181,7 +183,8 @@ def cmd_status(raw_json=False):
 def cmd_daemon(interval: int = DAEMON_INTERVAL):
     """Run in foreground, refresh every `interval` seconds."""
     signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
-    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 
     print(f"ccusage daemon started (refreshing every {interval}s)")
     print(f"Writing to {USAGE_FILE}")
@@ -238,12 +241,12 @@ def _get_cached_usage(max_age: int = DAEMON_INTERVAL) -> dict:
 
 def cmd_statusline():
     """Claude Code statusline command. Reads Claude's JSON from stdin + cached usage."""
-    R = "\033[0;31m"
-    Y = "\033[0;33m"
-    G = "\033[0;32m"
-    C = "\033[0;36m"
-    D = "\033[0;90m"
-    RST = "\033[0m"
+    R = "\033[0;31m" if _TTY else ""
+    Y = "\033[0;33m" if _TTY else ""
+    G = "\033[0;32m" if _TTY else ""
+    C = "\033[0;36m" if _TTY else ""
+    D = "\033[0;90m" if _TTY else ""
+    RST = "\033[0m" if _TTY else ""
 
     def color_pct(pct: int) -> str:
         c = R if pct >= 70 else Y if pct >= 50 else G

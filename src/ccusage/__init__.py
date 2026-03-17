@@ -16,6 +16,7 @@ Usage:
 import argparse
 import json
 import signal
+import subprocess
 import sys
 import time
 import urllib.request
@@ -24,9 +25,48 @@ from pathlib import Path
 
 _TTY = sys.stdout.isatty()
 
+
+def _resolve_claude_path(relative: str) -> Path:
+    """Return the first existing path for a file inside ~/.claude/.
+
+    On Windows, if the native path doesn't exist, also checks WSL distros
+    so the tool works from a Windows terminal against a WSL-based Claude Code
+    installation.
+
+    Args:
+        relative: path relative to the .claude directory, e.g. ".credentials.json"
+    """
+    native = Path.home() / ".claude" / relative
+    if native.exists() or sys.platform != "win32":
+        return native
+
+    # Windows: try WSL paths
+    try:
+        out = subprocess.run(
+            ["wsl", "-l", "-q"],
+            capture_output=True, text=True, timeout=5,
+        )
+        distros = [d.strip() for d in out.stdout.splitlines() if d.strip()]
+    except Exception:
+        return native
+
+    for distro in distros:
+        wsl_base = Path(f"//wsl$/{distro}/home")
+        try:
+            users = [p.name for p in wsl_base.iterdir() if p.is_dir()]
+        except OSError:
+            continue
+        for user in users:
+            candidate = wsl_base / user / ".claude" / relative
+            if candidate.exists():
+                return candidate
+
+    return native
+
+
 CLAUDE_DIR = Path.home() / ".claude"
-CREDENTIALS_FILE = CLAUDE_DIR / ".credentials.json"
-USAGE_FILE = CLAUDE_DIR / "usage-limits.json"
+CREDENTIALS_FILE = _resolve_claude_path(".credentials.json")
+USAGE_FILE = _resolve_claude_path("usage-limits.json")
 DAEMON_INTERVAL = 300  # 5 minutes
 
 

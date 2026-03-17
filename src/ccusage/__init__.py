@@ -44,9 +44,10 @@ def _resolve_claude_path(relative: str) -> Path:
     try:
         out = subprocess.run(
             ["wsl", "-l", "-q"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, timeout=5,
         )
-        distros = [d.strip() for d in out.stdout.splitlines() if d.strip()]
+        decoded = out.stdout.decode("utf-16-le", errors="ignore")
+        distros = [d.strip() for d in decoded.splitlines() if d.strip()]
     except Exception:
         return native
 

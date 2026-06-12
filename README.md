@@ -136,7 +136,7 @@ The OAuth token lives at `~/.claude/.credentials.json`:
 }
 ```
 
-The access token expires roughly hourly. Claude Code refreshes it automatically — as long as you have an active Claude Code session, the token stays valid for ccusage to read.
+The access token expires roughly hourly. When it's expired (or rejected with a 401/403), ccusage refreshes it itself using the `refreshToken` and writes the rotated credentials back to `.credentials.json` — the same flow Claude Code uses, so the two stay in sync and no active Claude Code session is needed.
 
 ### Warning thresholds (from cli.js)
 

@@ -15,10 +15,12 @@ Usage:
 
 import argparse
 import json
+import os
 import signal
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -69,6 +71,8 @@ CLAUDE_DIR = Path.home() / ".claude"
 CREDENTIALS_FILE = _resolve_claude_path(".credentials.json")
 USAGE_FILE = _resolve_claude_path("usage-limits.json")
 DAEMON_INTERVAL = 300  # 5 minutes
+TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
+CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"  # Claude Code's public OAuth client
 
 
 def get_credentials() -> dict | None:
@@ -90,10 +94,59 @@ def get_plan(creds: dict | None = None) -> str:
     return tier.removeprefix("default_claude_")
 
 
+def refresh_credentials(creds: dict) -> dict:
+    """Refresh the OAuth access token and persist updated credentials.
+
+    Anthropic rotates refresh tokens, so the new refreshToken MUST be written
+    back to .credentials.json or Claude Code's stored one goes stale and the
+    user gets logged out.
+    """
+    oauth = creds.get("claudeAiOauth", {})
+    refresh_token = oauth.get("refreshToken")
+    if not refresh_token:
+        raise RuntimeError("OAuth token expired and no refresh token — open Claude Code to log in")
+
+    payload = json.dumps({
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "client_id": CLIENT_ID,
+    }).encode()
+    req = urllib.request.Request(
+        TOKEN_URL,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"Token refresh failed ({e.code}) — open Claude Code to refresh it") from e
+
+    oauth = dict(oauth)
+    oauth["accessToken"] = result["access_token"]
+    if result.get("refresh_token"):
+        oauth["refreshToken"] = result["refresh_token"]
+    oauth["expiresAt"] = int(time.time() * 1000 + int(result.get("expires_in", 3600)) * 1000)
+    updated = dict(creds)
+    updated["claudeAiOauth"] = oauth
+
+    try:
+        tmp = CREDENTIALS_FILE.parent / (CREDENTIALS_FILE.name + ".tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(updated))
+        os.replace(tmp, CREDENTIALS_FILE)
+    except OSError as e:
+        print(f"Warning: refreshed token but could not write {CREDENTIALS_FILE}: {e}", file=sys.stderr)
+
+    return updated
+
+
 def fetch_usage() -> dict:
     """Fetch usage from Anthropic's /api/oauth/usage endpoint.
 
-    Requires a valid (non-expired) OAuth token from ~/.claude/.credentials.json.
+    Reads the OAuth token from ~/.claude/.credentials.json, auto-refreshing it
+    (and persisting the rotated credentials) when expired or rejected.
     The key header is `anthropic-beta: oauth-2025-04-20` — without it, the
     endpoint returns an auth error.
 
@@ -115,21 +168,33 @@ def fetch_usage() -> dict:
     if not token:
         raise RuntimeError("No OAuth access token in credentials")
 
-    expires_at = oauth.get("expiresAt", 0)
-    if time.time() * 1000 > expires_at:
-        raise RuntimeError("OAuth token expired — open Claude Code to refresh it")
+    # Refresh proactively if expired (or about to), then retry once on 401/403
+    # in case the token was revoked early.
+    if time.time() * 1000 > oauth.get("expiresAt", 0) - 60_000:
+        creds = refresh_credentials(creds)
+        token = creds["claudeAiOauth"]["accessToken"]
 
-    req = urllib.request.Request(
-        "https://api.anthropic.com/api/oauth/usage",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "User-Agent": "claude-code/2.1.71",
-            "anthropic-beta": "oauth-2025-04-20",
-        },
-    )
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        return json.loads(resp.read())
+    for attempt in range(2):
+        req = urllib.request.Request(
+            "https://api.anthropic.com/api/oauth/usage",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                "User-Agent": "claude-code/2.1.71",
+                "anthropic-beta": "oauth-2025-04-20",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403) and attempt == 0:
+                creds = refresh_credentials(creds)
+                token = creds["claudeAiOauth"]["accessToken"]
+            else:
+                raise
+
+    raise RuntimeError("Failed to fetch usage after token refresh")
 
 
 def build_usage_json(api_data: dict, plan: str) -> dict:

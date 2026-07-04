@@ -85,6 +85,15 @@ Claude Code gets rate limit data from two places:
 | `seven_day_opus` | `seven_day_opus` | Rolling 7-day Opus-specific window |
 | `overage` | `extra_usage` | Extra/overage usage (if enabled) |
 
+The flat `seven_day_*` keys above are all `null` now — the live quota data
+lives in a structured `limits` array, which ccusage reads. Each entry is
+self-describing: `kind` (`session` / `weekly_all` / `weekly_scoped`),
+`percent`, `resets_at`, and for scoped limits a `scope.model.display_name`.
+Model-scoped weekly windows (Opus, Sonnet, and a newly added **Fable**) are
+keyed by their model name, so any new one is auto-detected and displayed with
+no code change (e.g. `scope.model.display_name: "Fable"` → "Week (Fable)",
+statusline `fab:`).
+
 ### API response format
 
 ```

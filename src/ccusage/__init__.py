@@ -197,25 +197,92 @@ def fetch_usage() -> dict:
     raise RuntimeError("Failed to fetch usage after token refresh")
 
 
+# Top-level keys in the cached usage dict that are NOT rate-limit buckets.
+_META_KEYS = {"plan", "source", "updated_at", "extra_usage"}
+
+
+def _bucket_display(short_key: str) -> tuple[str, str]:
+    """Return (full label, statusline abbrev) for a short bucket key.
+
+    Derived from the key so unknown/newly-added buckets get a reasonable
+    label automatically, e.g. "7d_fable" -> ("Week (Fable)", "fab").
+    """
+    known = {
+        "5h": ("Session (5h)", "5h"),
+        "7d": ("Week (all)", "7d"),
+        "7d_opus": ("Week (Opus)", "opus"),
+        "7d_sonnet": ("Week (Sonnet)", "son"),
+    }
+    if short_key in known:
+        return known[short_key]
+    if short_key.startswith("7d_"):
+        model = short_key[3:]
+        return f"Week ({model.replace('_', ' ').title()})", model[:3]
+    return short_key.replace("_", " ").title(), short_key[:4]
+
+
+def _quota_buckets(data: dict):
+    """Yield (short_key, bucket) for each rate-limit bucket in a usage dict.
+
+    Relies on insertion order (build_usage_json inserts them sorted), so
+    callers get a stable, sensible display sequence.
+    """
+    for key, val in data.items():
+        if key in _META_KEYS:
+            continue
+        if isinstance(val, dict) and "pct" in val:
+            yield key, val
+
+
+def _buckets_from_limits(limits) -> list:
+    """Parse the API's structured `limits` array into (order, short_key, bucket).
+
+    This is the current API shape. Each entry is self-describing:
+        {"kind": "session"|"weekly_all"|"weekly_scoped", "percent": 58,
+         "resets_at": "...", "scope": {"model": {"display_name": "Fable"}}}
+    Model-scoped weekly limits (Opus, Sonnet, Fable, ...) are keyed by their
+    model name, so a newly added one appears automatically.
+    """
+    out = []
+    for entry in limits:
+        if not isinstance(entry, dict):
+            continue
+        pct = entry.get("percent")
+        if pct is None:
+            continue
+        kind = entry.get("kind")
+        if kind == "session":
+            short_key, order = "5h", 0
+        elif kind == "weekly_all":
+            short_key, order = "7d", 1
+        elif kind == "weekly_scoped":
+            model = (entry.get("scope") or {}).get("model") or {}
+            name = (model.get("display_name") or model.get("id") or "scoped").strip()
+            short_key = "7d_" + name.lower().replace(" ", "_")
+            order = {"7d_opus": 2, "7d_sonnet": 3}.get(short_key, 4)
+        else:
+            short_key, order = kind or "unknown", 5
+        out.append((order, short_key, {"pct": pct, "resets_at": entry.get("resets_at")}))
+    return out
+
+
 def build_usage_json(api_data: dict, plan: str) -> dict:
-    """Transform API response into our cached format."""
+    """Transform API response into our cached format.
+
+    Reads the API's structured `limits` array — every quota it reports (session,
+    weekly-all, and per-model weekly windows like Opus/Sonnet/Fable) is included
+    and mapped to a short key, so a newly added one appears automatically
+    instead of being dropped.
+    """
     result = {
         "plan": plan,
         "source": "api",
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
-    for key, api_key in [
-        ("5h", "five_hour"),
-        ("7d", "seven_day"),
-        ("7d_sonnet", "seven_day_sonnet"),
-        ("7d_opus", "seven_day_opus"),
-    ]:
-        bucket = api_data.get(api_key)
-        if bucket:
-            result[key] = {
-                "pct": bucket["utilization"],
-                "resets_at": bucket.get("resets_at"),
-            }
+    limits = api_data.get("limits")
+    buckets = _buckets_from_limits(limits) if isinstance(limits, list) else []
+    for _, short_key, bucket in sorted(buckets, key=lambda b: b[0]):
+        result[short_key] = bucket
     extra = api_data.get("extra_usage")
     if extra:
         result["extra_usage"] = extra
@@ -227,13 +294,51 @@ def write_usage_file(data: dict):
     USAGE_FILE.write_text(json.dumps(data, indent=2) + "\n")
 
 
+def _read_cache() -> dict | None:
+    """Read the cached usage file, or None if missing/unreadable."""
+    try:
+        return json.loads(USAGE_FILE.read_text())
+    except Exception:
+        return None
+
+
+def _is_429(err: Exception) -> bool:
+    """True if the exception is (or wraps) an HTTP 429 rate-limit error."""
+    if isinstance(err, urllib.error.HTTPError) and err.code == 429:
+        return True
+    return "429" in str(err)
+
+
+def _cache_age_str(data: dict) -> str:
+    """Return e.g. ' 3m ago' from a usage dict's updated_at, or '' if unknown."""
+    try:
+        updated = datetime.fromisoformat(data["updated_at"])
+        secs = int((datetime.now(timezone.utc) - updated).total_seconds())
+        m = secs // 60
+        return f" {m // 60}h{m % 60}m ago" if m >= 60 else f" {m}m ago"
+    except Exception:
+        return ""
+
+
 # -- CLI commands --
 
 def cmd_status(raw_json=False):
-    """Fetch and display current usage."""
-    api_data = fetch_usage()
-    plan = get_plan()
-    data = build_usage_json(api_data, plan)
+    """Fetch and display current usage.
+
+    Fetches fresh from the API, but on failure (rate limit, offline, expired
+    token) falls back to the last cached usage rather than crashing.
+    """
+    stale = False
+    try:
+        api_data = fetch_usage()
+        data = build_usage_json(api_data, get_plan())
+    except Exception as e:
+        cached = _read_cache()
+        if cached is None:
+            reason = "rate limited (HTTP 429) — try again shortly" if _is_429(e) else str(e)
+            print(f"Could not fetch usage: {reason}", file=sys.stderr)
+            sys.exit(1)
+        data, stale = cached, True
 
     if raw_json:
         print(json.dumps(data, indent=2))
@@ -266,24 +371,42 @@ def cmd_status(raw_json=False):
         except Exception:
             return ""
 
-    print(f"Plan: {plan}")
-    for label, key in [
-        ("Session (5h)", "5h"),
-        ("Week (all)", "7d"),
-        ("Week (Sonnet)", "7d_sonnet"),
-        ("Week (Opus)", "7d_opus"),
-    ]:
-        bucket = data.get(key)
-        if bucket:
-            pct = bucket["pct"]
-            reset = fmt_reset(bucket.get("resets_at"))
-            print(f"  {label:20s} {color_pct(pct)}{D}{reset}{RST}")
+    print(f"Plan: {data.get('plan', '?')}")
+    for key, bucket in _quota_buckets(data):
+        label = _bucket_display(key)[0]
+        pct = bucket["pct"]
+        reset = fmt_reset(bucket.get("resets_at"))
+        print(f"  {label:20s} {color_pct(pct)}{D}{reset}{RST}")
 
     extra = data.get("extra_usage")
     if extra and extra.get("is_enabled"):
         used = extra.get("used_credits", 0) / 100
         limit = extra.get("monthly_limit", 0) / 100
         print(f"  {'Extra usage':20s} ${used:.2f} / ${limit:.2f}")
+
+    if stale:
+        age = _cache_age_str(data)
+        print(f"{D}  (cached{age} — live fetch failed){RST}", file=sys.stderr)
+
+
+def cmd_refresh():
+    """Fetch fresh usage from the API and write the cache file once, then exit.
+
+    A one-shot equivalent of a single daemon tick — use it to force
+    ~/.claude/usage-limits.json up to date without running the daemon.
+    """
+    try:
+        api_data = fetch_usage()
+    except Exception as e:
+        reason = "rate limited (HTTP 429) — try again shortly" if _is_429(e) else str(e)
+        print(f"Could not refresh usage: {reason}", file=sys.stderr)
+        sys.exit(1)
+    data = build_usage_json(api_data, get_plan())
+    write_usage_file(data)
+    pcts = " ".join(f"{key}:{int(b['pct'])}%" for key, b in _quota_buckets(data))
+    print(f"Updated {USAGE_FILE}")
+    if pcts:
+        print(f"  {pcts}")
 
 
 def cmd_daemon(interval: int = DAEMON_INTERVAL):
@@ -303,11 +426,7 @@ def cmd_daemon(interval: int = DAEMON_INTERVAL):
             data = build_usage_json(api_data, plan)
             write_usage_file(data)
             backoff = 0
-            pcts = []
-            for key in ("5h", "7d", "7d_sonnet"):
-                b = data.get(key)
-                if b:
-                    pcts.append(f"{key}:{int(b['pct'])}%")
+            pcts = [f"{key}:{int(b['pct'])}%" for key, b in _quota_buckets(data)]
             print(f"[{datetime.now().strftime('%H:%M:%S')}] {' '.join(pcts)}")
         except urllib.error.HTTPError as e:
             if e.code == 429:
@@ -393,17 +512,13 @@ def cmd_statusline():
 
     plan = usage.get("plan", "?")
     five_h = usage.get("5h", {})
-    seven_d = usage.get("7d", {})
-    sonnet = usage.get("7d_sonnet", {})
 
     parts = [f"{D}{pwd}{RST}", f"[{C}{model}{RST}]"]
 
-    if five_h:
-        parts.append(f"5h:{color_pct(int(five_h.get('pct', 0)))}")
-    if seven_d:
-        parts.append(f"7d:{color_pct(int(seven_d.get('pct', 0)))}")
-    if sonnet:
-        parts.append(f"son:{color_pct(int(sonnet.get('pct', 0)))}")
+    # Auto-include every quota bucket present (a newly added one just appears).
+    for key, bucket in _quota_buckets(usage):
+        abbrev = _bucket_display(key)[1]
+        parts.append(f"{abbrev}:{color_pct(int(bucket.get('pct', 0)))}")
 
     parts.append(f"| {cost_fmt} | {D}{plan}{RST}")
 
@@ -440,6 +555,7 @@ def main():
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("status", help="Show current usage (default)")
     sub.add_parser("json", help="Print raw JSON")
+    sub.add_parser("refresh", help="Fetch fresh usage and update the cache file once")
     daemon_parser = sub.add_parser("daemon", help="Run refresh daemon")
     daemon_parser.add_argument("-i", "--interval", type=int, default=DAEMON_INTERVAL,
                                help=f"Refresh interval in seconds (default: {DAEMON_INTERVAL})")
@@ -452,6 +568,8 @@ def main():
         cmd_status()
     elif cmd == "json":
         cmd_status(raw_json=True)
+    elif cmd == "refresh":
+        cmd_refresh()
     elif cmd == "daemon":
         cmd_daemon(interval=args.interval)
     elif cmd == "statusline":

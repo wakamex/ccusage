@@ -159,20 +159,40 @@ class FetchUsageTests(unittest.TestCase):
 
 
 class BuildUsageJsonTests(unittest.TestCase):
-    def test_maps_buckets_and_extra_usage(self):
+    def test_reads_structured_limits_array(self):
+        # Current API shape: session/weekly totals and the model-scoped Fable
+        # quota all live in `limits`; the flat seven_day_* keys are ignored.
         api_data = {
-            "five_hour": {"utilization": 35.0, "resets_at": "2026-06-12T00:00:00+00:00"},
-            "seven_day": {"utilization": 14.0, "resets_at": None},
-            "seven_day_sonnet": None,
             "seven_day_opus": None,
+            "seven_day_sonnet": None,
+            "iguana_necktie": None,
+            "limits": [
+                {"kind": "session", "percent": 3, "resets_at": "2026-07-04T05:10:00+00:00"},
+                {"kind": "weekly_all", "percent": 33, "resets_at": "2026-07-07T13:00:00+00:00"},
+                {"kind": "weekly_scoped", "percent": 58,
+                 "resets_at": "2026-07-07T13:00:00+00:00",
+                 "scope": {"model": {"id": None, "display_name": "Fable"}}},
+            ],
             "extra_usage": {"is_enabled": True, "monthly_limit": 100000},
         }
         result = ccusage.build_usage_json(api_data, "max_20x")
         self.assertEqual(result["plan"], "max_20x")
-        self.assertEqual(result["5h"], {"pct": 35.0, "resets_at": "2026-06-12T00:00:00+00:00"})
-        self.assertEqual(result["7d"], {"pct": 14.0, "resets_at": None})
-        self.assertNotIn("7d_sonnet", result)
+        self.assertEqual(result["5h"], {"pct": 3, "resets_at": "2026-07-04T05:10:00+00:00"})
+        self.assertEqual(result["7d"], {"pct": 33, "resets_at": "2026-07-07T13:00:00+00:00"})
+        self.assertEqual(result["7d_fable"], {"pct": 58, "resets_at": "2026-07-07T13:00:00+00:00"})
         self.assertEqual(result["extra_usage"], {"is_enabled": True, "monthly_limit": 100000})
+        self.assertEqual(ccusage._bucket_display("7d_fable"), ("Week (Fable)", "fab"))
+        # Buckets appear in a stable, sensible order.
+        keys = [k for k, _ in ccusage._quota_buckets(result)]
+        self.assertEqual(keys, ["5h", "7d", "7d_fable"])
+
+    def test_scoped_limit_without_percent_is_skipped(self):
+        api_data = {"limits": [
+            {"kind": "weekly_scoped", "percent": None,
+             "scope": {"model": {"display_name": "Opus"}}},
+        ]}
+        result = ccusage.build_usage_json(api_data, "max_20x")
+        self.assertEqual([k for k, _ in ccusage._quota_buckets(result)], [])
 
 
 if __name__ == "__main__":

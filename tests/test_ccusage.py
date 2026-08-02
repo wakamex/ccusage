@@ -224,14 +224,39 @@ class BuildUsageJsonTests(unittest.TestCase):
         }
         result = ccusage.build_usage_json(api_data, "max_20x")
         self.assertEqual(result["plan"], "max_20x")
-        self.assertEqual(result["5h"], {"pct": 3, "resets_at": "2026-07-04T05:10:00+00:00"})
+        self.assertEqual(result["session"], {"pct": 3, "resets_at": "2026-07-04T05:10:00+00:00"})
+        self.assertNotIn("5h", result)
         self.assertEqual(result["7d"], {"pct": 33, "resets_at": "2026-07-07T13:00:00+00:00"})
         self.assertEqual(result["7d_fable"], {"pct": 58, "resets_at": "2026-07-07T13:00:00+00:00"})
         self.assertEqual(result["extra_usage"], {"is_enabled": True, "monthly_limit": 100000})
         self.assertEqual(ccusage._bucket_display("7d_fable"), ("Week (Fable)", "fab"))
         # Buckets appear in a stable, sensible order.
         keys = [k for k, _ in ccusage._quota_buckets(result)]
-        self.assertEqual(keys, ["5h", "7d", "7d_fable"])
+        self.assertEqual(keys, ["session", "7d", "7d_fable"])
+
+    def test_statusline_uses_semantic_session_bucket_for_reset(self):
+        usage = {
+            "plan": "max_20x",
+            "session": {
+                "pct": 3,
+                "resets_at": "2099-01-01T00:00:00+00:00",
+            },
+            "7d": {"pct": 13, "resets_at": None},
+        }
+        status_input = {
+            "model": {"display_name": "Test"},
+            "workspace": {"current_dir": "/code/test"},
+        }
+        with (
+            mock.patch.object(ccusage, "_get_cached_usage", return_value=usage),
+            mock.patch("sys.stdin", io.StringIO(json.dumps(status_input))),
+            mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            ccusage.cmd_statusline()
+
+        output = stdout.getvalue()
+        self.assertIn("sess:3%", output)
+        self.assertIn("reset:", output)
 
     def test_scoped_limit_without_percent_is_skipped(self):
         api_data = {"limits": [

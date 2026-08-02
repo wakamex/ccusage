@@ -8,7 +8,7 @@ Claude Code usage monitor. Fetches your real rate limit data from Anthropic's AP
 
 ```
 Plan: max_5x
-  Session (5h)         39%  resets 1h26m
+  Session              39%  resets 1h26m
   Week (all)           15%  resets 143h26m
   Week (Sonnet)        39%  resets 65h26m
   Extra usage          $0.00 / $1000.00
@@ -17,7 +17,7 @@ Plan: max_5x
 Claude Code statusline (self-caching — refreshes from API when stale, no daemon needed):
 
 ```
-~/projects/myapp [Opus 4.6] 5h:39% 7d:15% son:39% | $1.37 | max_5x | reset:1h26m
+~/projects/myapp [Opus 4.6] sess:39% 7d:15% son:39% | $1.37 | max_5x | reset:1h26m
 ```
 
 ## Install
@@ -89,6 +89,9 @@ The flat `seven_day_*` keys above are all `null` now — the live quota data
 lives in a structured `limits` array, which ccusage reads. Each entry is
 self-describing: `kind` (`session` / `weekly_all` / `weekly_scoped`),
 `percent`, `resets_at`, and for scoped limits a `scope.model.display_name`.
+Because the structured response does not include a session duration, ccusage
+labels that limit `Session` and caches it under `session` rather than assuming
+it is always five hours. Existing `5h` cache files remain readable.
 Model-scoped weekly windows (Opus, Sonnet, and a newly added **Fable**) are
 keyed by their model name, so any new one is auto-detected and displayed with
 no code change (e.g. `scope.model.display_name: "Fable"` → "Week (Fable)",

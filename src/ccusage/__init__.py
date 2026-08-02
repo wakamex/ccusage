@@ -260,6 +260,7 @@ def _bucket_display(short_key: str) -> tuple[str, str]:
     label automatically, e.g. "7d_fable" -> ("Week (Fable)", "fab").
     """
     known = {
+        "session": ("Session", "sess"),
         "5h": ("Session (5h)", "5h"),
         "7d": ("Week (all)", "7d"),
         "7d_opus": ("Week (Opus)", "opus"),
@@ -304,7 +305,7 @@ def _buckets_from_limits(limits) -> list:
             continue
         kind = entry.get("kind")
         if kind == "session":
-            short_key, order = "5h", 0
+            short_key, order = "session", 0
         elif kind == "weekly_all":
             short_key, order = "7d", 1
         elif kind == "weekly_scoped":
@@ -563,18 +564,19 @@ def cmd_statusline():
     usage = _get_cached_usage()
 
     plan = usage.get("plan", "?")
-    five_h = usage.get("5h", {})
-
     parts = [f"{D}{pwd}{RST}", f"[{C}{model}{RST}]"]
 
     # Auto-include every quota bucket present (a newly added one just appears).
+    session_bucket = {}
     for key, bucket in _quota_buckets(usage):
         abbrev = _bucket_display(key)[1]
         parts.append(f"{abbrev}:{color_pct(int(bucket.get('pct', 0)))}")
+        if key in {"session", "5h"}:
+            session_bucket = bucket
 
     parts.append(f"| {cost_fmt} | {D}{plan}{RST}")
 
-    reset = fmt_reset(five_h.get("resets_at"))
+    reset = fmt_reset(session_bucket.get("resets_at"))
     if reset:
         parts.append(f"| {D}reset:{reset}{RST}")
 
@@ -598,7 +600,7 @@ def cmd_install():
    }
 
 3. The statusline reads ~/.claude/usage-limits.json (written by the daemon)
-   and shows: 5h session, 7d all-models, 7d Sonnet-specific limits.
+   and shows: session, weekly all-models, and weekly scoped limits.
 """)
 
 

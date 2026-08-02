@@ -72,8 +72,38 @@ CLAUDE_DIR = Path.home() / ".claude"
 CREDENTIALS_FILE = _resolve_claude_path(".credentials.json")
 USAGE_FILE = _resolve_claude_path("usage-limits.json")
 DAEMON_INTERVAL = 300  # 5 minutes
+UNAVAILABLE_RETRY_INTERVAL = 3600  # 1 hour
 TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
 CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"  # Claude Code's public OAuth client
+
+
+class UsageUnavailableError(RuntimeError):
+    """The account is authenticated but its usage endpoint is unavailable."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+def _usage_unavailable_error(error: urllib.error.HTTPError) -> UsageUnavailableError | None:
+    """Translate known account-level authorization failures into a typed error."""
+    if error.code != 403:
+        return None
+    try:
+        payload = json.loads(error.read())
+        api_error = payload.get("error") or {}
+        details = api_error.get("details") or {}
+        code = details.get("error_code")
+        message = api_error.get("message")
+    except (AttributeError, json.JSONDecodeError, TypeError):
+        return None
+    if code != "oauth_not_allowed_for_organization":
+        return None
+    return UsageUnavailableError(
+        code,
+        message or "OAuth authentication is not allowed for this organization.",
+    )
 
 
 def get_credentials() -> dict | None:
@@ -168,6 +198,9 @@ def refresh_credentials(creds: dict) -> dict:
         with urllib.request.urlopen(req, timeout=10) as resp:
             result = json.loads(resp.read())
     except urllib.error.HTTPError as e:
+        unavailable = _usage_unavailable_error(e)
+        if unavailable:
+            raise unavailable from e
         latest = get_credentials()
         if e.code in (400, 401) and latest:
             if _credential_identity(latest) != expected_identity:
@@ -231,7 +264,10 @@ def fetch_usage() -> dict:
             with urllib.request.urlopen(req, timeout=10) as resp:
                 return json.loads(resp.read())
         except urllib.error.HTTPError as e:
-            if e.code not in (401, 403):
+            unavailable = _usage_unavailable_error(e)
+            if unavailable:
+                raise unavailable from e
+            if e.code != 401:
                 raise
 
             latest = get_credentials()
@@ -250,7 +286,10 @@ def fetch_usage() -> dict:
 
 
 # Top-level keys in the cached usage dict that are NOT rate-limit buckets.
-_META_KEYS = {"plan", "source", "updated_at", "extra_usage"}
+_META_KEYS = {
+    "plan", "source", "updated_at", "last_success_at", "status",
+    "unavailable", "extra_usage",
+}
 
 
 def _bucket_display(short_key: str) -> tuple[str, str]:
@@ -342,6 +381,43 @@ def build_usage_json(api_data: dict, plan: str) -> dict:
     return result
 
 
+def build_unavailable_usage(
+    error: UsageUnavailableError, plan: str, previous: dict | None = None
+) -> dict:
+    """Build a cache tombstone that replaces stale quota values."""
+    result = {
+        "plan": plan,
+        "source": "api",
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "status": "unavailable",
+        "unavailable": {
+            "code": error.code,
+            "message": error.message,
+            "hint": "no active subscription or organization OAuth disabled",
+        },
+    }
+    if previous:
+        last_success = previous.get("last_success_at")
+        if not last_success and previous.get("status") != "unavailable":
+            last_success = previous.get("updated_at")
+        if last_success:
+            result["last_success_at"] = last_success
+    return result
+
+
+def _unavailable_hint(data: dict) -> str | None:
+    unavailable = data.get("unavailable")
+    if data.get("status") != "unavailable" or not isinstance(unavailable, dict):
+        return None
+    return unavailable.get("hint") or unavailable.get("message") or "usage unavailable"
+
+
+def _cache_unavailable(error: UsageUnavailableError) -> dict:
+    data = build_unavailable_usage(error, get_plan(), _read_cache())
+    write_usage_file(data)
+    return data
+
+
 def write_usage_file(data: dict):
     """Write usage data to ~/.claude/usage-limits.json."""
     USAGE_FILE.write_text(json.dumps(data, indent=2) + "\n")
@@ -385,6 +461,8 @@ def cmd_status(raw_json=False):
     try:
         api_data = fetch_usage()
         data = build_usage_json(api_data, get_plan())
+    except UsageUnavailableError as e:
+        data = _cache_unavailable(e)
     except Exception as e:
         cached = _read_cache()
         if cached is None:
@@ -425,6 +503,10 @@ def cmd_status(raw_json=False):
             return ""
 
     print(f"Plan: {data.get('plan', '?')}")
+    unavailable = _unavailable_hint(data)
+    if unavailable:
+        print(f"  Usage unavailable: {unavailable}")
+        return
     for key, bucket in _quota_buckets(data):
         label = _bucket_display(key)[0]
         pct = bucket["pct"]
@@ -450,6 +532,11 @@ def cmd_refresh():
     """
     try:
         api_data = fetch_usage()
+    except UsageUnavailableError as e:
+        data = _cache_unavailable(e)
+        print(f"Updated {USAGE_FILE}")
+        print(f"  Usage unavailable: {_unavailable_hint(data)}")
+        return
     except Exception as e:
         reason = "rate limited (HTTP 429) — try again shortly" if _is_429(e) else str(e)
         print(f"Could not refresh usage: {reason}", file=sys.stderr)
@@ -481,6 +568,14 @@ def cmd_daemon(interval: int = DAEMON_INTERVAL):
             backoff = 0
             pcts = [f"{key}:{int(b['pct'])}%" for key, b in _quota_buckets(data)]
             print(f"[{datetime.now().strftime('%H:%M:%S')}] {' '.join(pcts)}")
+        except UsageUnavailableError as e:
+            data = _cache_unavailable(e)
+            backoff = UNAVAILABLE_RETRY_INTERVAL
+            print(
+                f"[{datetime.now().strftime('%H:%M:%S')}] "
+                f"Usage unavailable: {_unavailable_hint(data)}; retrying in {backoff}s",
+                file=sys.stderr,
+            )
         except urllib.error.HTTPError as e:
             if e.code == 429:
                 backoff = min((backoff or interval) * 2, 3600)
@@ -509,6 +604,8 @@ def _get_cached_usage(max_age: int = DAEMON_INTERVAL) -> dict:
         usage = build_usage_json(api_data, get_plan())
         write_usage_file(usage)
         return usage
+    except UsageUnavailableError as e:
+        return _cache_unavailable(e)
     except Exception:
         # Return whatever we had, even if stale
         try:
@@ -565,6 +662,9 @@ def cmd_statusline():
 
     plan = usage.get("plan", "?")
     parts = [f"{D}{pwd}{RST}", f"[{C}{model}{RST}]"]
+
+    if _unavailable_hint(usage):
+        parts.append("usage:unavailable")
 
     # Auto-include every quota bucket present (a newly added one just appears).
     session_bucket = {}

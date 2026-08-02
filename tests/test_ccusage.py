@@ -140,6 +140,36 @@ class FetchUsageTests(unittest.TestCase):
             with self.assertRaises(urllib.error.HTTPError):
                 ccusage.fetch_usage()
 
+    def test_organization_oauth_denial_is_not_treated_as_token_rejection(self):
+        self._write_creds(int(time.time() * 1000) + 3_600_000)
+        calls = []
+        denial = {
+            "type": "error",
+            "error": {
+                "type": "permission_error",
+                "message": "OAuth authentication is currently not allowed for this organization.",
+                "details": {
+                    "error_code": "oauth_not_allowed_for_organization",
+                },
+            },
+        }
+
+        def fake_urlopen(req, timeout=None):
+            calls.append(req.full_url)
+            raise urllib.error.HTTPError(
+                req.full_url, 403, "Forbidden", {},
+                io.BytesIO(json.dumps(denial).encode()),
+            )
+
+        with mock.patch.object(ccusage.urllib.request, "urlopen", fake_urlopen):
+            with self.assertRaises(ccusage.UsageUnavailableError) as raised:
+                ccusage.fetch_usage()
+
+        self.assertEqual(
+            raised.exception.code, "oauth_not_allowed_for_organization"
+        )
+        self.assertEqual(calls, [USAGE_URL])
+
     def test_rejected_token_reloads_concurrently_updated_credentials(self):
         self._write_creds(int(time.time() * 1000) + 3_600_000)
         replacement = _creds(int(time.time() * 1000) + 3_600_000)
@@ -265,6 +295,100 @@ class BuildUsageJsonTests(unittest.TestCase):
         ]}
         result = ccusage.build_usage_json(api_data, "max_20x")
         self.assertEqual([k for k, _ in ccusage._quota_buckets(result)], [])
+
+    def test_unavailable_tombstone_preserves_success_time_not_quota_values(self):
+        previous = {
+            "plan": "max_20x",
+            "updated_at": "2026-07-27T12:00:00+00:00",
+            "session": {"pct": 3, "resets_at": None},
+            "7d": {"pct": 13, "resets_at": None},
+        }
+        error = ccusage.UsageUnavailableError(
+            "oauth_not_allowed_for_organization",
+            "OAuth authentication is currently not allowed for this organization.",
+        )
+
+        result = ccusage.build_unavailable_usage(error, "max_20x", previous)
+
+        self.assertEqual(result["status"], "unavailable")
+        self.assertEqual(result["last_success_at"], previous["updated_at"])
+        self.assertEqual(
+            result["unavailable"]["code"],
+            "oauth_not_allowed_for_organization",
+        )
+        self.assertNotIn("session", result)
+        self.assertNotIn("7d", result)
+        self.assertEqual(list(ccusage._quota_buckets(result)), [])
+
+
+class UnavailableCacheTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.usage_file = Path(self._tmp.name) / "usage-limits.json"
+        patcher = mock.patch.object(ccusage, "USAGE_FILE", self.usage_file)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.error = ccusage.UsageUnavailableError(
+            "oauth_not_allowed_for_organization",
+            "OAuth authentication is currently not allowed for this organization.",
+        )
+
+    def test_stale_cache_is_replaced_when_refresh_is_unavailable(self):
+        self.usage_file.write_text(json.dumps({
+            "plan": "max_20x",
+            "updated_at": "2026-07-27T12:00:00+00:00",
+            "session": {"pct": 3, "resets_at": None},
+        }))
+
+        with (
+            mock.patch.object(ccusage, "fetch_usage", side_effect=self.error),
+            mock.patch.object(ccusage, "get_plan", return_value="max_20x"),
+        ):
+            result = ccusage._get_cached_usage(max_age=0)
+
+        self.assertEqual(result["status"], "unavailable")
+        self.assertNotIn("session", result)
+        self.assertEqual(json.loads(self.usage_file.read_text()), result)
+
+    def test_daemon_uses_hourly_retry_for_unavailable_usage(self):
+        sleeps = []
+
+        def stop_after_sleep(seconds):
+            sleeps.append(seconds)
+            raise KeyboardInterrupt
+
+        with (
+            mock.patch.object(ccusage, "fetch_usage", side_effect=self.error),
+            mock.patch.object(ccusage, "get_plan", return_value="max_20x"),
+            mock.patch.object(ccusage.signal, "signal"),
+            mock.patch.object(ccusage.time, "sleep", side_effect=stop_after_sleep),
+            mock.patch("sys.stdout", new_callable=io.StringIO),
+            mock.patch("sys.stderr", new_callable=io.StringIO),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            ccusage.cmd_daemon(interval=300)
+
+        self.assertEqual(sleeps, [ccusage.UNAVAILABLE_RETRY_INTERVAL])
+        cached = json.loads(self.usage_file.read_text())
+        self.assertEqual(cached["status"], "unavailable")
+
+    def test_statusline_reports_unavailable_without_quota_values(self):
+        usage = ccusage.build_unavailable_usage(self.error, "max_20x")
+        status_input = {
+            "model": {"display_name": "Test"},
+            "workspace": {"current_dir": "/code/test"},
+        }
+        with (
+            mock.patch.object(ccusage, "_get_cached_usage", return_value=usage),
+            mock.patch("sys.stdin", io.StringIO(json.dumps(status_input))),
+            mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            ccusage.cmd_statusline()
+
+        output = stdout.getvalue()
+        self.assertIn("usage:unavailable", output)
+        self.assertNotIn("sess:", output)
 
 
 if __name__ == "__main__":

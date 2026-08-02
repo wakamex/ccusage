@@ -107,6 +107,7 @@ class FetchUsageTests(unittest.TestCase):
         self.assertEqual(oauth["subscriptionType"], "max")
         self.assertEqual(on_disk["otherTopLevel"], "keep-me")
         self.assertEqual(self.credfile.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(list(self.credfile.parent.glob("..credentials.json.*")), [])
 
     def test_rejected_token_retries_once_after_refresh(self):
         self._write_creds(int(time.time() * 1000) + 3_600_000)
@@ -138,6 +139,52 @@ class FetchUsageTests(unittest.TestCase):
         with mock.patch.object(ccusage.urllib.request, "urlopen", fake_urlopen):
             with self.assertRaises(urllib.error.HTTPError):
                 ccusage.fetch_usage()
+
+    def test_rejected_token_reloads_concurrently_updated_credentials(self):
+        self._write_creds(int(time.time() * 1000) + 3_600_000)
+        replacement = _creds(int(time.time() * 1000) + 3_600_000)
+        replacement["claudeAiOauth"]["accessToken"] = "replacement-token"
+        replacement["claudeAiOauth"]["refreshToken"] = "replacement-refresh"
+        calls = []
+
+        def fake_urlopen(req, timeout=None):
+            calls.append(req.full_url)
+            if len(calls) == 1:
+                self.credfile.write_text(json.dumps(replacement))
+                raise urllib.error.HTTPError(
+                    req.full_url, 401, "Unauthorized", {}, io.BytesIO(b"")
+                )
+            self.assertEqual(
+                req.headers["Authorization"], "Bearer replacement-token"
+            )
+            return _json_response({"ok": True})
+
+        with mock.patch.object(ccusage.urllib.request, "urlopen", fake_urlopen):
+            self.assertEqual(ccusage.fetch_usage(), {"ok": True})
+
+        self.assertEqual(calls, [USAGE_URL, USAGE_URL])
+
+    def test_refresh_does_not_overwrite_concurrently_rotated_credentials(self):
+        self._write_creds(0)
+        original = json.loads(self.credfile.read_text())
+        replacement = _creds(int(time.time() * 1000) + 3_600_000)
+        replacement["claudeAiOauth"]["accessToken"] = "replacement-token"
+        replacement["claudeAiOauth"]["refreshToken"] = "replacement-refresh"
+
+        class RotatingResponse(_FakeResponse):
+            def read(inner_self, *args):
+                self.credfile.write_text(json.dumps(replacement))
+                return super().read(*args)
+
+        with mock.patch.object(
+            ccusage.urllib.request,
+            "urlopen",
+            return_value=RotatingResponse(json.dumps(REFRESH_RESULT).encode()),
+        ):
+            result = ccusage.refresh_credentials(original)
+
+        self.assertEqual(result, replacement)
+        self.assertEqual(json.loads(self.credfile.read_text()), replacement)
 
     def test_expired_token_without_refresh_token_raises(self):
         creds = _creds(0)

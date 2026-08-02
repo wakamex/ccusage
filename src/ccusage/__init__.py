@@ -19,6 +19,7 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -94,6 +95,48 @@ def get_plan(creds: dict | None = None) -> str:
     return tier.removeprefix("default_claude_")
 
 
+def _credential_identity(creds: dict | None) -> tuple[object, object]:
+    oauth = (creds or {}).get("claudeAiOauth", {})
+    return oauth.get("accessToken"), oauth.get("refreshToken")
+
+
+def _persist_credentials(updated: dict, expected_identity: tuple[object, object]) -> dict:
+    latest = get_credentials()
+    if latest and _credential_identity(latest) != expected_identity:
+        return latest
+    if latest:
+        latest_oauth = latest.get("claudeAiOauth", {})
+        updated_oauth = updated.get("claudeAiOauth", {})
+        updated = {
+            **latest,
+            **updated,
+            "claudeAiOauth": {**latest_oauth, **updated_oauth},
+        }
+
+    tmp: Path | None = None
+    try:
+        CREDENTIALS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{CREDENTIALS_FILE.name}.", dir=CREDENTIALS_FILE.parent
+        )
+        tmp = Path(tmp_name)
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w") as file:
+            file.write(json.dumps(updated))
+        os.replace(tmp, CREDENTIALS_FILE)
+    except OSError as exc:
+        if tmp:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        print(
+            f"Warning: refreshed token but could not write {CREDENTIALS_FILE}: {exc}",
+            file=sys.stderr,
+        )
+    return updated
+
+
 def refresh_credentials(creds: dict) -> dict:
     """Refresh the OAuth access token and persist updated credentials.
 
@@ -101,6 +144,11 @@ def refresh_credentials(creds: dict) -> dict:
     back to .credentials.json or Claude Code's stored one goes stale and the
     user gets logged out.
     """
+    expected_identity = _credential_identity(creds)
+    latest = get_credentials()
+    if latest and _credential_identity(latest) != expected_identity:
+        return latest
+
     oauth = creds.get("claudeAiOauth", {})
     refresh_token = oauth.get("refreshToken")
     if not refresh_token:
@@ -120,6 +168,10 @@ def refresh_credentials(creds: dict) -> dict:
         with urllib.request.urlopen(req, timeout=10) as resp:
             result = json.loads(resp.read())
     except urllib.error.HTTPError as e:
+        latest = get_credentials()
+        if e.code in (400, 401) and latest:
+            if _credential_identity(latest) != expected_identity:
+                return latest
         raise RuntimeError(f"Token refresh failed ({e.code}) — open Claude Code to refresh it") from e
 
     oauth = dict(oauth)
@@ -130,16 +182,7 @@ def refresh_credentials(creds: dict) -> dict:
     updated = dict(creds)
     updated["claudeAiOauth"] = oauth
 
-    try:
-        tmp = CREDENTIALS_FILE.parent / (CREDENTIALS_FILE.name + ".tmp")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as f:
-            f.write(json.dumps(updated))
-        os.replace(tmp, CREDENTIALS_FILE)
-    except OSError as e:
-        print(f"Warning: refreshed token but could not write {CREDENTIALS_FILE}: {e}", file=sys.stderr)
-
-    return updated
+    return _persist_credentials(updated, expected_identity)
 
 
 def fetch_usage() -> dict:
@@ -168,13 +211,13 @@ def fetch_usage() -> dict:
     if not token:
         raise RuntimeError("No OAuth access token in credentials")
 
-    # Refresh proactively if expired (or about to), then retry once on 401/403
-    # in case the token was revoked early.
+    # Refresh proactively if expired (or about to).
     if time.time() * 1000 > oauth.get("expiresAt", 0) - 60_000:
         creds = refresh_credentials(creds)
         token = creds["claudeAiOauth"]["accessToken"]
 
-    for attempt in range(2):
+    refreshed_after_rejection = False
+    for attempt in range(3):
         req = urllib.request.Request(
             "https://api.anthropic.com/api/oauth/usage",
             headers={
@@ -188,11 +231,20 @@ def fetch_usage() -> dict:
             with urllib.request.urlopen(req, timeout=10) as resp:
                 return json.loads(resp.read())
         except urllib.error.HTTPError as e:
-            if e.code in (401, 403) and attempt == 0:
-                creds = refresh_credentials(creds)
-                token = creds["claudeAiOauth"]["accessToken"]
-            else:
+            if e.code not in (401, 403):
                 raise
+
+            latest = get_credentials()
+            latest_token = (latest or {}).get("claudeAiOauth", {}).get("accessToken")
+            if latest_token and latest_token != token:
+                creds, token = latest, latest_token
+                continue
+            if not refreshed_after_rejection:
+                creds = refresh_credentials(latest or creds)
+                token = creds["claudeAiOauth"]["accessToken"]
+                refreshed_after_rejection = True
+                continue
+            raise
 
     raise RuntimeError("Failed to fetch usage after token refresh")
 

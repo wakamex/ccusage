@@ -20,10 +20,10 @@ jobs:
         with:
           enable-cache: false
       - name: Verify version tag
-        run: test "$GITHUB_REF_NAME" = "v$(uv version --short)"
+        run: test "$GITHUB_REF_NAME" = "v$(uv --no-config version --short)"
       - name: Test
-        run: uv run --locked python -m unittest discover -s tests
+        run: uv --no-config run --locked python -m unittest discover -s tests
       - name: Build
-        run: uv build --no-sources
+        run: uv --no-config build --no-sources
       - name: Publish
         run: uv publish --trusted-publishing always

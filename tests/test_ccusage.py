@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import tempfile
 import time
 import unittest
@@ -44,6 +45,33 @@ REFRESH_RESULT = {
     "refresh_token": "new-refresh",
     "expires_in": 28800,
 }
+
+
+class ClaudePathTests(unittest.TestCase):
+    def test_config_dir_override_matches_claude_code(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_dir = Path(tmp) / "claude-config"
+            with mock.patch.dict(
+                os.environ, {"CLAUDE_CONFIG_DIR": str(config_dir)}, clear=False
+            ):
+                path = ccusage._resolve_claude_path(".credentials.json")
+
+        self.assertEqual(path, config_dir / ".credentials.json")
+
+    def test_config_dir_override_does_not_fall_back_to_wsl(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_dir = Path(tmp) / "missing-config"
+            with (
+                mock.patch.dict(
+                    os.environ, {"CLAUDE_CONFIG_DIR": str(config_dir)}, clear=False
+                ),
+                mock.patch.object(ccusage.sys, "platform", "win32"),
+                mock.patch.object(ccusage.subprocess, "run") as run_mock,
+            ):
+                path = ccusage._resolve_claude_path(".credentials.json")
+
+        self.assertEqual(path, config_dir / ".credentials.json")
+        run_mock.assert_not_called()
 
 
 class FetchUsageTests(unittest.TestCase):

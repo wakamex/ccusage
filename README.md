@@ -47,6 +47,9 @@ Configure the statusline in `~/.claude/settings.json`:
 }
 ```
 
+If Claude Code uses `CLAUDE_CONFIG_DIR`, ccusage reads credentials and writes
+`usage-limits.json` in that directory instead.
+
 ## Commands
 
 | Command | Description |
@@ -134,7 +137,8 @@ anthropic-beta: oauth-2025-04-20
 
 ### Authentication
 
-The OAuth token lives at `~/.claude/.credentials.json`:
+The OAuth token normally lives at `~/.claude/.credentials.json`, or under
+`CLAUDE_CONFIG_DIR` when that environment variable is set:
 
 ```json
 {

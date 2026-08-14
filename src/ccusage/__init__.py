@@ -29,18 +29,23 @@ from pathlib import Path
 _TTY = sys.stdout.isatty()
 
 
+def _claude_config_dir() -> Path:
+    override = os.environ.get("CLAUDE_CONFIG_DIR")
+    return Path(override) if override is not None else Path.home() / ".claude"
+
+
 def _resolve_claude_path(relative: str) -> Path:
-    """Return the first existing path for a file inside ~/.claude/.
+    """Return the first existing path for a file inside Claude's config directory.
 
     On Windows, if the native path doesn't exist, also checks WSL distros
     so the tool works from a Windows terminal against a WSL-based Claude Code
     installation.
 
     Args:
-        relative: path relative to the .claude directory, e.g. ".credentials.json"
+        relative: path relative to Claude's config directory, e.g. ".credentials.json"
     """
-    native = Path.home() / ".claude" / relative
-    if native.exists() or sys.platform != "win32":
+    native = _claude_config_dir() / relative
+    if "CLAUDE_CONFIG_DIR" in os.environ or native.exists() or sys.platform != "win32":
         return native
 
     # Windows: try WSL paths
@@ -68,7 +73,7 @@ def _resolve_claude_path(relative: str) -> Path:
     return native
 
 
-CLAUDE_DIR = Path.home() / ".claude"
+CLAUDE_DIR = _claude_config_dir()
 CREDENTIALS_FILE = _resolve_claude_path(".credentials.json")
 USAGE_FILE = _resolve_claude_path("usage-limits.json")
 DAEMON_INTERVAL = 300  # 5 minutes
@@ -237,7 +242,7 @@ def fetch_usage() -> dict:
     """
     creds = get_credentials()
     if not creds:
-        raise RuntimeError("No credentials at ~/.claude/.credentials.json — run `claude` first")
+        raise RuntimeError(f"No credentials at {CREDENTIALS_FILE} — run `claude` first")
 
     oauth = creds.get("claudeAiOauth", {})
     token = oauth.get("accessToken")

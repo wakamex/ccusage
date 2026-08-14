@@ -324,6 +324,50 @@ class BuildUsageJsonTests(unittest.TestCase):
         result = ccusage.build_usage_json(api_data, "max_20x")
         self.assertEqual([k for k, _ in ccusage._quota_buckets(result)], [])
 
+    def test_rejects_missing_or_ill_typed_limits(self):
+        for api_data in ({}, {"limits": None}, {"limits": {}}, {"limits": "bad"}):
+            with self.subTest(api_data=api_data):
+                with self.assertRaisesRegex(ValueError, "limits must be an array"):
+                    ccusage.build_usage_json(api_data, "max_20x")
+
+    def test_rejects_malformed_limit_entries(self):
+        malformed = [
+            "bad",
+            {"kind": None, "percent": 10},
+            {"kind": "weekly_scoped", "percent": 10, "scope": []},
+            {"kind": "weekly_scoped", "percent": 10, "scope": {"model": {}}},
+        ]
+        for entry in malformed:
+            with self.subTest(entry=entry):
+                with self.assertRaisesRegex(ValueError, "Invalid usage response"):
+                    ccusage.build_usage_json({"limits": [entry]}, "max_20x")
+
+    def test_rejects_non_finite_or_out_of_range_percentages(self):
+        for pct in (float("nan"), float("inf"), float("-inf"), -0.1, 100.1, True, "10"):
+            with self.subTest(pct=pct):
+                with self.assertRaisesRegex(ValueError, "percent must be between 0 and 100"):
+                    ccusage.build_usage_json(
+                        {"limits": [{"kind": "session", "percent": pct}]},
+                        "max_20x",
+                    )
+
+    def test_rejects_invalid_reset_times(self):
+        for resets_at in (42, "not-a-time", "2026-07-04T05:10:00"):
+            with self.subTest(resets_at=resets_at):
+                with self.assertRaisesRegex(ValueError, "reset time"):
+                    ccusage.build_usage_json(
+                        {
+                            "limits": [
+                                {
+                                    "kind": "session",
+                                    "percent": 10,
+                                    "resets_at": resets_at,
+                                }
+                            ]
+                        },
+                        "max_20x",
+                    )
+
     def test_unavailable_tombstone_preserves_success_time_not_quota_values(self):
         previous = {
             "plan": "max_20x",

@@ -15,6 +15,7 @@ Usage:
 
 import argparse
 import json
+import math
 import os
 import signal
 import subprocess
@@ -343,23 +344,50 @@ def _buckets_from_limits(limits) -> list:
     out = []
     for entry in limits:
         if not isinstance(entry, dict):
-            continue
+            raise ValueError("Invalid usage response: each limit must be an object")
         pct = entry.get("percent")
         if pct is None:
             continue
+        if (
+            isinstance(pct, bool)
+            or not isinstance(pct, int | float)
+            or not math.isfinite(pct)
+            or not 0 <= pct <= 100
+        ):
+            raise ValueError("Invalid usage response: limit percent must be between 0 and 100")
         kind = entry.get("kind")
+        if not isinstance(kind, str) or not kind:
+            raise ValueError("Invalid usage response: limit kind must be a non-empty string")
         if kind == "session":
             short_key, order = "session", 0
         elif kind == "weekly_all":
             short_key, order = "7d", 1
         elif kind == "weekly_scoped":
-            model = (entry.get("scope") or {}).get("model") or {}
-            name = (model.get("display_name") or model.get("id") or "scoped").strip()
+            scope = entry.get("scope")
+            model = scope.get("model") if isinstance(scope, dict) else None
+            if not isinstance(model, dict):
+                raise ValueError("Invalid usage response: scoped limit must identify a model")
+            name = model.get("display_name") or model.get("id")
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError("Invalid usage response: scoped limit must identify a model")
+            name = name.strip()
             short_key = "7d_" + name.lower().replace(" ", "_")
             order = {"7d_opus": 2, "7d_sonnet": 3}.get(short_key, 4)
         else:
-            short_key, order = kind or "unknown", 5
-        out.append((order, short_key, {"pct": pct, "resets_at": entry.get("resets_at")}))
+            short_key, order = kind, 5
+        resets_at = entry.get("resets_at")
+        if resets_at is not None:
+            if not isinstance(resets_at, str):
+                raise ValueError("Invalid usage response: reset time must be an ISO timestamp")
+            try:
+                reset = datetime.fromisoformat(resets_at.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise ValueError(
+                    "Invalid usage response: reset time must be an ISO timestamp"
+                ) from exc
+            if reset.tzinfo is None:
+                raise ValueError("Invalid usage response: reset time must include a timezone")
+        out.append((order, short_key, {"pct": pct, "resets_at": resets_at}))
     return out
 
 
@@ -377,7 +405,9 @@ def build_usage_json(api_data: dict, plan: str) -> dict:
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     limits = api_data.get("limits")
-    buckets = _buckets_from_limits(limits) if isinstance(limits, list) else []
+    if not isinstance(limits, list):
+        raise ValueError("Invalid usage response: limits must be an array")
+    buckets = _buckets_from_limits(limits)
     for _, short_key, bucket in sorted(buckets, key=lambda b: b[0]):
         result[short_key] = bucket
     extra = api_data.get("extra_usage")

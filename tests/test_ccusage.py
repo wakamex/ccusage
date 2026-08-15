@@ -307,6 +307,7 @@ class BuildUsageJsonTests(unittest.TestCase):
         }
         with (
             mock.patch.object(ccusage, "_get_cached_usage", return_value=usage),
+            mock.patch.object(ccusage, "_TTY", False),
             mock.patch("sys.stdin", io.StringIO(json.dumps(status_input))),
             mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
         ):

@@ -9,21 +9,21 @@ permissions:
 
 jobs:
   validate:
-    uses: wakamex/release-actions/.github/workflows/python-validation.yml@v1
+    uses: wakamex/release-actions/.github/workflows/python-validation.yml@stable
 
   publish:
     needs: validate
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: pypi
     permissions:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v7.0.1
-      - uses: wakamex/release-actions/pypi-publish@v1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: wakamex/release-actions/pypi-publish@stable
 
   github-release:
     needs: publish
     permissions:
       contents: write
-    uses: wakamex/release-actions/.github/workflows/github-release.yml@v1
+    uses: wakamex/release-actions/.github/workflows/github-release.yml@stable

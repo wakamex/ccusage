@@ -9,4 +9,4 @@ permissions:
 
 jobs:
   release-eligible:
-    uses: wakamex/release-actions/.github/workflows/python-validation.yml@v1
+    uses: wakamex/release-actions/.github/workflows/python-validation.yml@stable

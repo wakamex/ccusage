@@ -1,4 +1,3 @@
-```yaml
 name: Publish to PyPI
 
 on:

@@ -1,0 +1,13 @@
+```yaml
+name: Release eligibility
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  release-eligible:
+    uses: wakamex/release-actions/.github/workflows/python-validation.yml@v1

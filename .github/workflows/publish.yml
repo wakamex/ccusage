@@ -1,52 +1,30 @@
+```yaml
 name: Publish to PyPI
 
 on:
   push:
-    tags:
-      - "v*"
+    tags: ["v*"]
+
+permissions:
+  contents: read
 
 jobs:
+  validate:
+    uses: wakamex/release-actions/.github/workflows/python-validation.yml@v1
+
   publish:
+    needs: validate
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
       contents: read
       id-token: write
     steps:
-      - name: Checkout
-        uses: actions/checkout@v7.0.1
-      - name: Install uv
-        uses: astral-sh/setup-uv@v9.0.0
-        with:
-          enable-cache: false
-      - name: Verify version tag
-        run: test "$GITHUB_REF_NAME" = "v$(uv --no-config version --short)"
-      - name: Verify release notes
-        run: |
-          notes="release-notes/$GITHUB_REF_NAME.md"
-          test -f "$notes" && test ! -L "$notes" && test -s "$notes"
-      - name: Test
-        run: uv --no-config run --locked python -m unittest discover -s tests
-      - name: Build
-        run: uv --no-config build --no-sources
-      - name: Publish
-        run: uv publish --trusted-publishing always
+      - uses: actions/checkout@v7.0.1
+      - uses: wakamex/release-actions/pypi-publish@v1
 
   github-release:
     needs: publish
-    runs-on: ubuntu-latest
     permissions:
       contents: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7.0.1
-      - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
-            echo "GitHub Release $GITHUB_REF_NAME already exists"
-          else
-            gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" \
-              --notes-file "release-notes/$GITHUB_REF_NAME.md"
-          fi
+    uses: wakamex/release-actions/.github/workflows/github-release.yml@v1

@@ -21,9 +21,32 @@ jobs:
           enable-cache: false
       - name: Verify version tag
         run: test "$GITHUB_REF_NAME" = "v$(uv --no-config version --short)"
+      - name: Verify release notes
+        run: |
+          notes="release-notes/$GITHUB_REF_NAME.md"
+          test -f "$notes" && test ! -L "$notes" && test -s "$notes"
       - name: Test
         run: uv --no-config run --locked python -m unittest discover -s tests
       - name: Build
         run: uv --no-config build --no-sources
       - name: Publish
         run: uv publish --trusted-publishing always
+
+  github-release:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            echo "GitHub Release $GITHUB_REF_NAME already exists"
+          else
+            gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" \
+              --notes-file "release-notes/$GITHUB_REF_NAME.md"
+          fi

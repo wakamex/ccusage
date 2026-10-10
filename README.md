@@ -50,6 +50,8 @@ Configure the statusline in `~/.claude/settings.json`:
 If Claude Code uses `CLAUDE_CONFIG_DIR`, ccusage reads credentials and writes
 `usage-limits.json` in that directory instead.
 
+Each refresh also saves a copy under `usage-limits/<account uuid>.json`, tagged with the logged-in account's UUID and email from Claude Code's `.claude.json`. If you switch between Claude accounts with `/login`, the account you logged out of keeps its last usage there. An idle account cannot use quota, so that snapshot stays accurate until its windows reset.
+
 ## Commands
 
 | Command | Description |
@@ -177,4 +179,5 @@ seven_day:  75% at 60%, 50% at 35%, 25% at 15%
 | `~/.claude/.credentials.json` | Claude Code | OAuth tokens, plan tier |
 | `~/.claude/stats-cache.json` | Claude Code | Local usage stats (message counts, token counts per model) |
 | `~/.claude/usage-limits.json` | ccusage daemon | Cached API usage data (this tool) |
+| `~/.claude/usage-limits/<account uuid>.json` | ccusage daemon | Last usage seen for each Claude account (this tool) |
 | `~/.claude/statsig/` | Claude Code | Feature flags, experiment assignments |

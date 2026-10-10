@@ -464,5 +464,78 @@ class UnavailableCacheTests(unittest.TestCase):
         self.assertNotIn("sess:", output)
 
 
+class AccountSnapshotTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        self.usage_file = self.root / "usage-limits.json"
+        self.accounts_dir = self.root / "usage-limits"
+        for name, value in (("USAGE_FILE", self.usage_file), ("ACCOUNTS_DIR", self.accounts_dir)):
+            patcher = mock.patch.object(ccusage, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.config_dir = self.root / "config"
+        self.config_dir.mkdir()
+        env = mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.config_dir)}, clear=False)
+        env.start()
+        self.addCleanup(env.stop)
+
+    def _login(self, uuid: str, email: str):
+        (self.config_dir / ".claude.json").write_text(json.dumps({
+            "oauthAccount": {"accountUuid": uuid, "emailAddress": email, "organizationName": "x"},
+        }))
+
+    def test_current_account_reads_uuid_and_email_from_config_dir(self):
+        self._login("uuid-a", "a@example.com")
+        self.assertEqual(ccusage.current_account(), {"uuid": "uuid-a", "email": "a@example.com"})
+
+    def test_current_account_is_none_without_login(self):
+        self.assertIsNone(ccusage.current_account())
+        (self.config_dir / ".claude.json").write_text(json.dumps({"oauthAccount": None}))
+        self.assertIsNone(ccusage.current_account())
+
+    def test_write_keeps_a_snapshot_per_account(self):
+        self._login("uuid-a", "a@example.com")
+        account_a = ccusage.current_account()
+        ccusage.write_usage_file({"7d": {"pct": 91}}, account_a)
+        self._login("uuid-b", "b@example.com")
+        account_b = ccusage.current_account()
+        ccusage.write_usage_file({"7d": {"pct": 5}}, account_b)
+
+        snapshot_a = json.loads((self.accounts_dir / "uuid-a.json").read_text())
+        snapshot_b = json.loads((self.accounts_dir / "uuid-b.json").read_text())
+        main = json.loads(self.usage_file.read_text())
+        self.assertEqual(snapshot_a["7d"]["pct"], 91)
+        self.assertEqual(snapshot_a["account"]["email"], "a@example.com")
+        self.assertEqual(snapshot_b["7d"]["pct"], 5)
+        self.assertEqual(main, snapshot_b)
+
+    def test_snapshot_skipped_when_login_changes_during_fetch(self):
+        self._login("uuid-a", "a@example.com")
+        account_before_fetch = ccusage.current_account()
+        self._login("uuid-b", "b@example.com")
+        ccusage.write_usage_file({"7d": {"pct": 40}}, account_before_fetch)
+
+        self.assertFalse(self.accounts_dir.exists())
+        main = json.loads(self.usage_file.read_text())
+        self.assertNotIn("account", main)
+        self.assertEqual(main["7d"]["pct"], 40)
+
+    def test_refresh_writes_snapshot_for_logged_in_account(self):
+        self._login("uuid-a", "a@example.com")
+        api = {"limits": [{"name": "seven_day", "utilization": 12.0, "resets_at": None}]}
+        with (
+            mock.patch.object(ccusage, "fetch_usage", return_value=api),
+            mock.patch.object(ccusage, "get_plan", return_value="max_20x"),
+            mock.patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            ccusage.cmd_refresh()
+
+        snapshot = json.loads((self.accounts_dir / "uuid-a.json").read_text())
+        self.assertEqual(snapshot["account"]["uuid"], "uuid-a")
+        self.assertEqual(snapshot["plan"], "max_20x")
+
+
 if __name__ == "__main__":
     unittest.main()

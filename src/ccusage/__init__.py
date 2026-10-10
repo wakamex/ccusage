@@ -9,6 +9,7 @@ Usage:
     ccusage status       Same as above
     ccusage json         Print raw JSON
     ccusage daemon       Run in foreground, refresh every 5 min, write to ~/.claude/usage-limits.json
+                         and ~/.claude/usage-limits/<account uuid>.json
     ccusage statusline   Claude Code statusline command (reads stdin + cache)
     ccusage install      Print setup instructions
 """
@@ -77,6 +78,10 @@ def _resolve_claude_path(relative: str) -> Path:
 CLAUDE_DIR = _claude_config_dir()
 CREDENTIALS_FILE = _resolve_claude_path(".credentials.json")
 USAGE_FILE = _resolve_claude_path("usage-limits.json")
+# One snapshot per Claude account, keyed by account UUID, so an account that is
+# logged out keeps its last usage. Idle accounts cannot use quota, so the
+# snapshot stays accurate until its windows reset.
+ACCOUNTS_DIR = USAGE_FILE.parent / "usage-limits"
 DAEMON_INTERVAL = 300  # 5 minutes
 UNAVAILABLE_RETRY_INTERVAL = 3600  # 1 hour
 TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
@@ -447,15 +452,51 @@ def _unavailable_hint(data: dict) -> str | None:
     return unavailable.get("hint") or unavailable.get("message") or "usage unavailable"
 
 
-def _cache_unavailable(error: UsageUnavailableError) -> dict:
+def _cache_unavailable(error: UsageUnavailableError, account: dict | None = None) -> dict:
     data = build_unavailable_usage(error, get_plan(), _read_cache())
-    write_usage_file(data)
+    write_usage_file(data, account)
     return data
 
 
-def write_usage_file(data: dict):
-    """Write usage data to ~/.claude/usage-limits.json."""
-    USAGE_FILE.write_text(json.dumps(data, indent=2) + "\n")
+def current_account() -> dict | None:
+    """Return the logged-in account's UUID and email from Claude Code's config."""
+    if "CLAUDE_CONFIG_DIR" in os.environ:
+        path = _claude_config_dir() / ".claude.json"
+    else:
+        path = Path.home() / ".claude.json"
+    try:
+        account = json.loads(path.read_text()).get("oauthAccount") or {}
+    except (OSError, ValueError, AttributeError):
+        return None
+    if not account.get("accountUuid"):
+        return None
+    return {"uuid": account["accountUuid"], "email": account.get("emailAddress")}
+
+
+def _write_json(path: Path, data: dict):
+    """Write JSON through a temporary file so readers never see a partial file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as file:
+            file.write(json.dumps(data, indent=2) + "\n")
+        os.replace(tmp_name, path)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
+
+
+def write_usage_file(data: dict, account: dict | None = None):
+    """Write usage data to ~/.claude/usage-limits.json and the account's snapshot.
+
+    `account` is the logged-in account read before the usage was fetched. The
+    snapshot is skipped when a /login switched accounts during the fetch, since
+    the data could then belong to either account.
+    """
+    if account and current_account() == account:
+        data["account"] = account
+        _write_json(ACCOUNTS_DIR / f"{account['uuid']}.json", data)
+    _write_json(USAGE_FILE, data)
 
 
 def _read_cache() -> dict | None:
@@ -493,11 +534,12 @@ def cmd_status(raw_json=False):
     token) falls back to the last cached usage rather than crashing.
     """
     stale = False
+    account = current_account()
     try:
         api_data = fetch_usage()
         data = build_usage_json(api_data, get_plan())
     except UsageUnavailableError as e:
-        data = _cache_unavailable(e)
+        data = _cache_unavailable(e, account)
     except Exception as e:
         cached = _read_cache()
         if cached is None:
@@ -565,10 +607,11 @@ def cmd_refresh():
     A one-shot equivalent of a single daemon tick — use it to force
     ~/.claude/usage-limits.json up to date without running the daemon.
     """
+    account = current_account()
     try:
         api_data = fetch_usage()
     except UsageUnavailableError as e:
-        data = _cache_unavailable(e)
+        data = _cache_unavailable(e, account)
         print(f"Updated {USAGE_FILE}")
         print(f"  Usage unavailable: {_unavailable_hint(data)}")
         return
@@ -577,7 +620,7 @@ def cmd_refresh():
         print(f"Could not refresh usage: {reason}", file=sys.stderr)
         sys.exit(1)
     data = build_usage_json(api_data, get_plan())
-    write_usage_file(data)
+    write_usage_file(data, account)
     pcts = " ".join(f"{key}:{int(b['pct'])}%" for key, b in _quota_buckets(data))
     print(f"Updated {USAGE_FILE}")
     if pcts:
@@ -595,16 +638,17 @@ def cmd_daemon(interval: int = DAEMON_INTERVAL):
 
     backoff = 0
     while True:
+        account = current_account()
         try:
             api_data = fetch_usage()
             plan = get_plan()
             data = build_usage_json(api_data, plan)
-            write_usage_file(data)
+            write_usage_file(data, account)
             backoff = 0
             pcts = [f"{key}:{int(b['pct'])}%" for key, b in _quota_buckets(data)]
             print(f"[{datetime.now().strftime('%H:%M:%S')}] {' '.join(pcts)}")
         except UsageUnavailableError as e:
-            data = _cache_unavailable(e)
+            data = _cache_unavailable(e, account)
             backoff = UNAVAILABLE_RETRY_INTERVAL
             print(
                 f"[{datetime.now().strftime('%H:%M:%S')}] "
@@ -634,13 +678,14 @@ def _get_cached_usage(max_age: int = DAEMON_INTERVAL) -> dict:
     except Exception:
         pass
     # Cache is stale or missing — try to refresh
+    account = current_account()
     try:
         api_data = fetch_usage()
         usage = build_usage_json(api_data, get_plan())
-        write_usage_file(usage)
+        write_usage_file(usage, account)
         return usage
     except UsageUnavailableError as e:
-        return _cache_unavailable(e)
+        return _cache_unavailable(e, account)
     except Exception:
         # Return whatever we had, even if stale
         try:

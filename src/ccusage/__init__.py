@@ -84,7 +84,9 @@ USAGE_FILE = _resolve_claude_path("usage-limits.json")
 ACCOUNTS_DIR = USAGE_FILE.parent / "usage-limits"
 DAEMON_INTERVAL = 300  # 5 minutes
 UNAVAILABLE_RETRY_INTERVAL = 3600  # 1 hour
-TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
+TOKEN_URL = "https://api.anthropic.com/v1/oauth/token"
+# Anthropic's edge rejects the default urllib User-Agent with a 403.
+USER_AGENT = "claude-code/2.1.71"
 CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"  # Claude Code's public OAuth client
 
 
@@ -203,7 +205,7 @@ def refresh_credentials(creds: dict) -> dict:
     req = urllib.request.Request(
         TOKEN_URL,
         data=payload,
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", "User-Agent": USER_AGENT},
     )
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -267,7 +269,7 @@ def fetch_usage() -> dict:
             headers={
                 "Authorization": f"Bearer {token}",
                 "Content-Type": "application/json",
-                "User-Agent": "claude-code/2.1.71",
+                "User-Agent": USER_AGENT,
                 "anthropic-beta": "oauth-2025-04-20",
             },
         )

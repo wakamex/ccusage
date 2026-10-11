@@ -117,6 +117,7 @@ class FetchUsageTests(unittest.TestCase):
                         "client_id": ccusage.CLIENT_ID,
                     },
                 )
+                self.assertEqual(req.get_header("User-agent"), ccusage.USER_AGENT)
                 return _json_response(REFRESH_RESULT)
             self.assertEqual(req.headers["Authorization"], "Bearer new-token")
             return _json_response({"five_hour": {"utilization": 4.0}})

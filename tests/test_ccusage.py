@@ -7,6 +7,7 @@ import tempfile
 import time
 import unittest
 import urllib.error
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -535,6 +536,71 @@ class AccountSnapshotTests(unittest.TestCase):
         snapshot = json.loads((self.accounts_dir / "uuid-a.json").read_text())
         self.assertEqual(snapshot["account"]["uuid"], "uuid-a")
         self.assertEqual(snapshot["plan"], "max_20x")
+
+
+
+class DeferTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.accounts_dir = Path(self._tmp.name) / "usage-limits"
+        self.accounts_dir.mkdir()
+        patcher = mock.patch.object(ccusage, "ACCOUNTS_DIR", self.accounts_dir)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.account = {"uuid": "uuid-a", "email": "a@example.com"}
+
+    def _snapshot(self, seconds_old: float) -> str:
+        stamp = (datetime.now(timezone.utc) - timedelta(seconds=seconds_old)).isoformat()
+        (self.accounts_dir / "uuid-a.json").write_text(json.dumps({"updated_at": stamp}))
+        return stamp
+
+    def test_fresh_snapshot_from_another_daemon_covers_the_account(self):
+        self._snapshot(100)
+        self.assertTrue(ccusage._covered_by_another_daemon(self.account, "own-earlier-stamp", 300))
+        self.assertTrue(ccusage._covered_by_another_daemon(self.account, None, 300))
+
+    def test_own_snapshot_does_not_cover_the_account(self):
+        stamp = self._snapshot(100)
+        self.assertFalse(ccusage._covered_by_another_daemon(self.account, stamp, 300))
+
+    def test_stale_snapshot_from_another_daemon_does_not_cover(self):
+        self._snapshot(451)
+        self.assertFalse(ccusage._covered_by_another_daemon(self.account, None, 300))
+
+    def test_missing_snapshot_or_account_does_not_cover(self):
+        self.assertFalse(ccusage._covered_by_another_daemon(self.account, None, 300))
+        self.assertFalse(ccusage._covered_by_another_daemon(None, None, 300))
+
+    def _run_daemon_once(self, defer: bool):
+        def stop(_seconds):
+            raise KeyboardInterrupt
+
+        api = {"limits": [{"name": "seven_day", "utilization": 12.0, "resets_at": None}]}
+        with (
+            mock.patch.object(ccusage, "current_account", return_value=self.account),
+            mock.patch.object(ccusage, "fetch_usage", return_value=api) as fetch,
+            mock.patch.object(ccusage, "get_plan", return_value="max_20x"),
+            mock.patch.object(ccusage, "write_usage_file"),
+            mock.patch.object(ccusage.signal, "signal"),
+            mock.patch.object(ccusage.time, "sleep", side_effect=stop),
+            mock.patch("sys.stdout", new_callable=io.StringIO),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            ccusage.cmd_daemon(interval=300, defer=defer)
+        return fetch
+
+    def test_deferring_daemon_skips_the_fetch_when_covered(self):
+        self._snapshot(100)
+        self._run_daemon_once(defer=True).assert_not_called()
+
+    def test_daemon_without_defer_always_fetches(self):
+        self._snapshot(100)
+        self._run_daemon_once(defer=False).assert_called_once()
+
+    def test_deferring_daemon_fetches_when_not_covered(self):
+        self._snapshot(451)
+        self._run_daemon_once(defer=True).assert_called_once()
 
 
 if __name__ == "__main__":

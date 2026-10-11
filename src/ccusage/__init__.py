@@ -627,8 +627,31 @@ def cmd_refresh():
         print(f"  {pcts}")
 
 
-def cmd_daemon(interval: int = DAEMON_INTERVAL):
-    """Run in foreground, refresh every `interval` seconds."""
+def _covered_by_another_daemon(account: dict | None, own_stamp: str | None, interval: int) -> bool:
+    """True when a different daemon recently saved this account's snapshot.
+
+    Daemons for several config directories can share one snapshot directory
+    through a symlink. A snapshot whose timestamp this daemon did not write,
+    and that is younger than one and a half intervals, means another daemon is
+    polling the same account.
+    """
+    if not account:
+        return False
+    try:
+        stamp = json.loads((ACCOUNTS_DIR / f"{account['uuid']}.json").read_text())["updated_at"]
+        age = (datetime.now(timezone.utc) - datetime.fromisoformat(stamp)).total_seconds()
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    return stamp != own_stamp and age < 1.5 * interval
+
+
+def cmd_daemon(interval: int = DAEMON_INTERVAL, defer: bool = False):
+    """Run in foreground, refresh every `interval` seconds.
+
+    With `defer`, skip a refresh while another daemon keeps this account's
+    snapshot current, so an account logged in under two config directories is
+    polled once.
+    """
     signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
     if hasattr(signal, "SIGTERM"):
         signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
@@ -637,18 +660,29 @@ def cmd_daemon(interval: int = DAEMON_INTERVAL):
     print(f"Writing to {USAGE_FILE}")
 
     backoff = 0
+    own_stamp = None
+    deferring = False
     while True:
         account = current_account()
+        if defer and _covered_by_another_daemon(account, own_stamp, interval):
+            if not deferring:
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] deferring to another daemon for this account")
+            deferring = True
+            time.sleep(interval)
+            continue
+        deferring = False
         try:
             api_data = fetch_usage()
             plan = get_plan()
             data = build_usage_json(api_data, plan)
             write_usage_file(data, account)
+            own_stamp = data["updated_at"]
             backoff = 0
             pcts = [f"{key}:{int(b['pct'])}%" for key, b in _quota_buckets(data)]
             print(f"[{datetime.now().strftime('%H:%M:%S')}] {' '.join(pcts)}")
         except UsageUnavailableError as e:
             data = _cache_unavailable(e, account)
+            own_stamp = data["updated_at"]
             backoff = UNAVAILABLE_RETRY_INTERVAL
             print(
                 f"[{datetime.now().strftime('%H:%M:%S')}] "
@@ -793,6 +827,8 @@ def main():
     daemon_parser = sub.add_parser("daemon", help="Run refresh daemon")
     daemon_parser.add_argument("-i", "--interval", type=int, default=DAEMON_INTERVAL,
                                help=f"Refresh interval in seconds (default: {DAEMON_INTERVAL})")
+    daemon_parser.add_argument("--defer", action="store_true",
+                               help="Skip a refresh while another daemon keeps this account's snapshot current")
     sub.add_parser("statusline", help="Claude Code statusline (reads stdin + cache)")
     sub.add_parser("install", help="Print setup instructions")
     args = parser.parse_args()
@@ -805,7 +841,7 @@ def main():
     elif cmd == "refresh":
         cmd_refresh()
     elif cmd == "daemon":
-        cmd_daemon(interval=args.interval)
+        cmd_daemon(interval=args.interval, defer=args.defer)
     elif cmd == "statusline":
         cmd_statusline()
     elif cmd == "install":

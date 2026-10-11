@@ -52,13 +52,15 @@ If Claude Code uses `CLAUDE_CONFIG_DIR`, ccusage reads credentials and writes
 
 Each refresh also saves a copy under `usage-limits/<account uuid>.json`, tagged with the logged-in account's UUID and email from Claude Code's `.claude.json`. If you switch between Claude accounts with `/login`, the account you logged out of keeps its last usage there. An idle account cannot use quota, so that snapshot stays accurate until its windows reset.
 
+To keep a second account current while you are logged into another, give it its own config directory with a permanent login, run a second daemon there with `CLAUDE_CONFIG_DIR` set, and symlink that directory's `usage-limits` folder to the main one so both daemons share their snapshots. Start that daemon with `--defer`: it then skips a refresh whenever another daemon saved the same account's snapshot within the last one and a half intervals, so an account logged in under two config directories is polled once.
+
 ## Commands
 
 | Command | Description |
 |---------|-------------|
 | `ccusage` | Show current usage (colored terminal output) |
 | `ccusage json` | Print raw JSON |
-| `ccusage daemon [-i SECS]` | Run in foreground, refresh every 5 min (customizable) |
+| `ccusage daemon [-i SECS] [--defer]` | Run in foreground, refresh every 5 min (customizable) |
 | `ccusage statusline` | Claude Code statusline (self-caching, no daemon needed) |
 | `ccusage install` | Print setup instructions |
 
